@@ -148,7 +148,9 @@ def send_line_message(token, user_id, market_data, final_signal, status_report, 
         "Authorization": f"Bearer {token}"
     }
     
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+   # 加上 timedelta 幫時間手動加上 8 小時，修正為台灣時區
+taiwan_time = datetime.datetime.now() + datetime.timedelta(hours=8)
+current_time = taiwan_time.strftime("%Y-%m-%d %H:%M")
     
     # 1. 拼裝日報基本核心訊息 (天天看)
     vix_val = f"{market_data['vix']:.2f}" if market_data.get('vix') else "N/A"
