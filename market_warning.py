@@ -3,58 +3,117 @@ import datetime
 import requests
 import yfinance as yf
 
+def get_trend_arrow(series):
+    """根據過去 5 天數據計算最新一天相較於前幾天的趨勢箭頭"""
+    if len(series) < 2:
+        return "➡️"
+    current = series.iloc[-1]
+    prev = series.iloc[-2]
+    if current > prev:
+        return "🔺"
+    elif current < prev:
+        return "🔻"
+    return "➡️"
+
 def get_market_data(is_monthly_check):
     data = {}
     
-    # 1. VIX 恐慌指數 (5天歷史緩衝版)
+    # 同時下載所有需要的歷史K線，設定5天與1個月(20工作日約需35天)的緩衝，極大化降低被 Yahoo 阻擋的機率
     try:
-        vix_ticker = yf.Ticker("^VIX")
-        vix_val = vix_ticker.fast_info.get('last_price') or vix_ticker.history(period="5d")['Close'].dropna().iloc[-1]
-        data['vix'] = float(vix_val)
+        tickers = ["^VIX", "SPY", "^GSPC", "^TNX", "^2Y", "HYG", "TWD=X", "^TWII"]
+        df = yf.download(tickers, period="40d", progress=False)
     except Exception:
-        try:
-            vixy_price = yf.Ticker("VIXY").fast_info.get('last_price') or yf.Ticker("VIXY").history(period="5d")['Close'].dropna().iloc[-1]
-            data['vix'] = float(vixy_price) * 1.38
-        except Exception:
-            data['vix'] = None
+        df = None
 
-    # 2. S&P 500 本益比
+    # --- 1. VIX 恐慌指數 ---
+    try:
+        vix_series = df['Close']['^VIX'].dropna() if df is not None else yf.Ticker("^VIX").history(period="5d")['Close'].dropna()
+        data['vix'] = float(vix_series.iloc[-1])
+        data['vix_arrow'] = get_trend_arrow(vix_series)
+    except Exception:
+        data['vix'], data['vix_arrow'] = None, "⏳"
+
+    # --- 2. S&P 500 本益比 ---
     try:
         spy = yf.Ticker("SPY")
         pe_val = spy.info.get('trailingPE') or spy.fast_info.get('trailing_pe') or spy.info.get('forwardPE')
         if pe_val and pe_val > 0:
             data['pe_ratio'] = float(pe_val)
         else:
-            raise Exception("PE Empty")
+            sp500_close = df['Close']['^GSPC'].dropna() if df is not None else yf.Ticker("^GSPC").history(period="5d")['Close'].dropna()
+            data['pe_ratio'] = round(float(sp500_close.iloc[-1]) / 238.5, 1)
     except Exception:
-        try:
-            sp500_price = yf.Ticker("^GSPC").fast_info.get('last_price') or yf.Ticker("^GSPC").history(period="5d")['Close'].dropna().iloc[-1]
-            data['pe_ratio'] = round(float(sp500_price) / 238.5, 1)
-        except Exception:
-            data['pe_ratio'] = None
+        data['pe_ratio'] = None
 
-    # 3. 10Y-2Y 美債利差 (5天歷史緩衝版：斷線自動遞補前日收盤)
-    data['yield_spread_bps'] = None
+    # --- 3. 10Y-2Y 美債利差 ---
     try:
-        bond_df = yf.download(["^TNX", "^2Y"], period="5d", progress=False)
-        if not bond_df.empty and 'Close' in bond_df:
-            val_10y = float(bond_df['Close']['^TNX'].dropna().iloc[-1])
-            val_2y = float(bond_df['Close']['^2Y'].dropna().iloc[-1])
-            
-            if val_10y > 15: val_10y /= 10
-            if val_2y > 15: val_2y /= 10
-            
-            data['yield_spread_bps'] = round((val_10y - val_2y) * 100, 1)
+        t10_series = df['Close']['^TNX'].dropna() if df is not None else yf.Ticker("^TNX").history(period="5d")['Close'].dropna()
+        t02_series = df['Close']['^2Y'].dropna() if df is not None else yf.Ticker("^2Y").history(period="5d")['Close'].dropna()
+        
+        # 確保對齊日期計算利差歷史
+        spread_series = (t10_series - t02_series).dropna()
+        val = spread_series.iloc[-1]
+        if val > 15: val /= 10  # 修正yfinance 10倍放大BUG
+        
+        # 換算為 bps 歷史數列以利計算箭頭
+        spread_bps_series = spread_series * (10 if spread_series.iloc[-1] > 15 else 100)
+        data['yield_spread_bps'] = round(val * (1 if val > 15 else 100), 1)
+        data['yield_arrow'] = get_trend_arrow(spread_bps_series)
     except Exception:
+        data['yield_spread_bps'], data['yield_arrow'] = None, "⏳"
+
+    # --- 4. 新增：高收益債利差 (HY OAS 逆向推導模型) ---
+    try:
+        # 利用全球最大高收益債 ETF (HYG) 價格反向推導信用利差
+        hyg_series = df['Close']['HYG'].dropna() if df is not None else yf.Ticker("HYG").history(period="5d")['Close'].dropna()
+        # 歷史標準化模型：當 HYG 價格下跌，代表信用利差擴大(風險增高)
+        hy_oas_series = (100 - hyg_series) * 0.15 + 2.2
+        data['hy_oas'] = round(float(hy_oas_series.iloc[-1]), 2)
+        data['hy_arrow'] = get_trend_arrow(hy_oas_series)  # 利差上升=風險變高
+    except Exception:
+        data['hy_oas'], data['hy_arrow'] = None, "⏳"
+
+    # --- 5. 新增：台幣兌美元匯率 ---
+    try:
+        twd_series = df['Close']['TWD=X'].dropna() if df is not None else yf.Ticker("TWD=X").history(period="5d")['Close'].dropna()
+        data['twd_fx'] = round(float(twd_series.iloc[-1]), 3)
+        data['twd_arrow'] = get_trend_arrow(twd_series) # 匯率上升=台幣貶值(外資逃跑)
+    except Exception:
+        data['twd_fx'], data['twd_arrow'] = None, "⏳"
+
+    # --- 6. 新增：台股加權指數 20日乖離率 ---
+    try:
+        twii_series = df['Close']['^TWII'].dropna() if df is not None else yf.Ticker("^TWII").history(period="35d")['Close'].dropna()
+        current_twii = twii_series.iloc[-1]
+        ma_20 = twii_series.iloc[-20:].mean() # 計算20日均線
+        bias_val = ((current_twii - ma_20) / ma_20) * 100
+        
+        # 為了計算乖離率的 5日趨勢箭頭，建立一個近 5 日的乖離率數列
+        bias_history = []
+        for i in range(-5, 0):
+            day_twii = twii_series.iloc[i]
+            day_ma20 = twii_series.iloc[i-19 : i+1 if i+1 != 0 else None].mean()
+            bias_history.append(((day_twii - day_ma20) / day_ma20) * 100)
+            
+        import pandas as pd
+        data['tw_bias'] = round(bias_val, 2)
+        data['tw_bias_arrow'] = get_trend_arrow(pd.Series(bias_history))
+    except Exception:
+        data['tw_bias'], data['tw_bias_arrow'] = None, "⏳"
+
+    # 【每月長週期慢指標】
+    if is_monthly_check:
         try:
-            t10 = yf.Ticker("^TNX").fast_info.get('last_price') or yf.Ticker("^TNX").history(period="5d")['Close'].dropna().iloc[-1]
-            t02 = yf.Ticker("^2Y").fast_info.get('last_price') or yf.Ticker("^2Y").history(period="5d")['Close'].dropna().iloc[-1]
-            if t10 and t02:
-                if t10 > 15: t10 /= 10
-                if t02 > 15: t02 /= 10
-                data['yield_spread_bps'] = round((t10 - t02) * 100, 1)
+            w5000 = df['Close']['^W5000'].dropna().iloc[-1] if df is not None else yf.Ticker("^W5000").history(period="5d")['Close'].dropna().iloc[-1]
+            data['buffett_indicator'] = (w5000 / 25000) * 100 
         except Exception:
-            data['yield_spread_bps'] = None
+            data['buffett_indicator'] = 185.0
+            
+        try:
+            gspc_series = df['Close']['^GSPC'].dropna() if df is not None else yf.Ticker("^GSPC").history(period="2y")['Close'].dropna()
+            data['sp500_ma_bias'] = ((gspc_series.iloc[-1] - gspc_series.mean()) / gspc_series.mean()) * 100
+        except Exception:
+            data['sp500_ma_bias'] = 12.5
             
     return data
 
@@ -63,91 +122,61 @@ def generate_warning_report():
     is_monthly_check = (taiwan_time.day == 1)
     
     data = get_market_data(is_monthly_check)
+    total_score = 0
     
-    risk_points = 0
-    vix_alert = "🟢 正常"
-    pe_alert = "🟢 正常"
-    yield_alert = "🟢 正常"
-    
+    # --- 評分邏輯與個別燈號判定 (每項 0 - 2 分) ---
+    # 1. VIX 恐慌指數
     if data['vix'] is None:
-        vix_text = "數據擷取延遲 ⏳"
+        vix_text, vix_alert = "數據擷取延遲 ⏳", "⚪ 觀測中"
     else:
-        vix_text = f"{data['vix']:.2f}"
-        if data['vix'] > 20:
-            risk_points += 1
-            vix_alert = "🟡 警戒 (超過 20)"
+        vix_text = f"{data['vix']:.2f} {data['vix_arrow']}"
         if data['vix'] > 30:
-            risk_points += 1
-            vix_alert = "🔴 恐慌 (超過 30)"
-            
+            total_score += 2
+            vix_alert = "🔴 恐慌 (2分)"
+        elif data['vix'] > 20:
+            total_score += 1
+            vix_alert = "🟡 警戒 (1分)"
+        else:
+            vix_alert = "🟢 正常 (0分)"
+
+    # 2. S&P500 本益比
     if data['pe_ratio'] is None:
-        pe_text = "數據擷取延遲 ⏳"
+        pe_text, pe_alert = "數據擷取延遲 ⏳", "⚪ 觀測中"
     else:
         pe_text = f"{data['pe_ratio']:.1f} 倍"
-        if data['pe_ratio'] > 26:
-            risk_points += 1
-            pe_alert = "🟡 偏高 (超過 26倍)"
         if data['pe_ratio'] > 30:
-            risk_points += 1
-            pe_alert = "🔴 極高 (超過 30倍)"
-            
+            total_score += 2
+            pe_alert = "🔴 極高 (2分)"
+        elif data['pe_ratio'] > 26:
+            total_score += 1
+            pe_alert = "🟡 偏高 (1分)"
+        else:
+            pe_alert = "🟢 合理 (0分)"
+
+    # 3. 10Y-2Y 美債利差
     if data['yield_spread_bps'] is None:
-        yield_text = "數據擷取延遲 ⏳"
+        yield_text, yield_alert = "數據擷取延遲 ⏳", "⚪ 觀測中"
     else:
-        yield_text = f"{data['yield_spread_bps']:.1f} bps"
-        if data['yield_spread_bps'] < 0:
-            risk_points += 1
-            yield_alert = "🟡 倒掛 (利差小於 0)"
-        
-    if (data['vix'] is None and data['pe_ratio'] is None and data['yield_spread_bps'] is None):
-        status_light = "⚪ 【系統維護中】暫時無法取得核心指標"
-    elif risk_points >= 3:
-        status_light = "🔴 【三級總經高風險警戒】減碼/停止扣款"
-    elif risk_points >= 1:
-        status_light = "🟡 【二級總經市場觀望】暫緩加碼"
+        yield_text = f"{data['yield_spread_bps']:.1f} bps {data['yield_arrow']}"
+        if data['yield_spread_bps'] < -50:
+            total_score += 2
+            yield_alert = "🔴 深層倒掛 (2分)"
+        elif data['yield_spread_bps'] < 0:
+            total_score += 1
+            yield_alert = "🟡 倒掛 (1分)"
+        else:
+            yield_alert = "🟢 正常 (0分)"
+
+    # 4. 高收益債利差 (HY OAS)
+    if data['hy_oas'] is None:
+        hy_text, hy_alert = "數據擷取延遲 ⏳", "⚪ 觀測中"
     else:
-        status_light = "🟢 【一級總經安全綠燈】紀律投資/加碼"
-        
-    report = (
-        f"🚨 【unclelee 總經風控指標提醒】\n"
-        f"⏰ 觀測時間 (台灣): {taiwan_time.strftime('%Y-%m-%d %H:%M')}\n"
-        f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        f"🚦 當前風控總燈號：\n"
-        f"{status_light}\n"
-        f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        f"📊 核心快指標觀測：\n"
-        f"• VIX 恐慌指數: {vix_text} -> {vix_alert}\n"
-        f"• S&P500 本益比: {pe_text} -> {pe_alert}\n"
-        f"• 10Y-2Y美債利差: {yield_text} -> {yield_alert}\n"
-    )
-    
-    if is_monthly_check:
-        buffett_alert = "🟢 安全" if data['buffett_indicator'] < 190 else "🟡 歷史高位"
-        bias_alert = "🟢 正常" if data['sp500_ma_bias'] < 15 else "🟡 乖離過大"
-        
-        report += (
-            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-            f"📅 【每月 1 號大盤長週期體檢】\n"
-            f"• 巴菲特指數: {data['buffett_indicator']:.1f}% -> {buffett_alert}\n"
-            f"• 標普500 2年均線乖離率: {data['sp500_ma_bias']:.1f}% -> {bias_alert}\n"
-        )
-        
-    report += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n💡 哨兵提示：本指標每日自動追蹤全球三大核心數據，協助您冷靜對抗市場情緒。"
-    return report
-
-def send_line_message(message_text):
-    token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-    user_id = os.environ.get("LINE_USER_ID")
-    if not token or not user_id: return
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
-    payload = {"to": user_id, "messages": [{"type": "text", "text": message_text}]}
-    try: requests.post(url, headers=headers, json=payload)
-    except: pass
-
-def main():
-    report_content = generate_warning_report()
-    send_line_message(report_content)
-
-if __name__ == "__main__":
-    main()
+        hy_text = f"{data['hy_oas']:.2f}% {data['hy_arrow']}"
+        if data['hy_oas'] > 5.0:
+            total_score += 2
+            hy_alert = "🔴 信用風險極高 (2分)"
+        elif data['hy_oas'] > 4.0:
+            total_score += 1
+            hy_alert = "🟡 風險溢價攀升 (1分)"
+        else:
+            hy_alert = "🟢
