@@ -27,28 +27,37 @@ def get_market_data(is_monthly_check):
     except Exception:
         data['pe_ratio'] = None
 
-    # 3. 10Y-2Y 美債利差 (精準修正版：直接下載大盤歷史K線，並自動修正 yfinance 的 10 倍縮放異常)
+    # 3. 10Y-2Y 美債利差 (強固雙軌道版：拒絕備援假數字，失敗直白通報)
+    data['yield_spread_bps'] = None
+    
+    # 【第一軌道】嘗試輕量化直取最新報價
     try:
-        # 同時下載 10年美債殖利率(^TNX) 與 2年美債殖利率(^IRX)
-        bond_df = yf.download(["^TNX", "^IRX"], period="5d", progress=False)
+        # 下載最新2天數據即可，降低資料量避免被阻擋
+        bond_df = yf.download(["^TNX", "^IRX"], period="2d", progress=False)
         if not bond_df.empty and 'Close' in bond_df:
-            # 抓取最新一個有效交易日的收盤數值
             val_10y = float(bond_df['Close']['^TNX'].dropna().iloc[-1])
             val_2y = float(bond_df['Close']['^IRX'].dropna().iloc[-1])
             
-            # 【核心修正】yfinance 抓美債常有放大 10 倍的世紀 BUG (例如 4.2% 變成 42.0)
-            # 如果發現數字大於 15，代表被自動放大了，必須除以 10 還原
+            # 自動校正 yfinance 放大 10 倍的 BUG
             if val_10y > 15: val_10y /= 10
             if val_2y > 15: val_2y /= 10
             
-            # 真實利差計算公式：(10年期殖利率 - 2年期殖利率) * 100 倍百分點 (bps)
-            # 例如 10年期 4.2% - 2年期 4.4% = -0.2% = -20 bps
-            calculated_bps = (val_10y - val_2y) * 100
-            data['yield_spread_bps'] = round(calculated_bps, 1)
-        else:
-            raise Exception("Bond download empty")
+            data['yield_spread_bps'] = round((val_10y - val_2y) * 100, 1)
     except Exception:
-        data['yield_spread_bps'] = None
+        pass
+
+    # 【第二軌道】若第一軌道失敗，改用單點即時追蹤
+    if data['yield_spread_bps'] is None:
+        try:
+            t10 = yf.Ticker("^TNX").info.get('regularMarketPrice') or yf.Ticker("^TNX").fast_info.get('last_price')
+            t02 = yf.Ticker("^IRX").info.get('regularMarketPrice') or yf.Ticker("^IRX").fast_info.get('last_price')
+            if t10 and t02:
+                if t10 > 15: t10 /= 10
+                if t02 > 15: t02 /= 10
+                data['yield_spread_bps'] = round((t10 - t02) * 100, 1)
+        except Exception:
+            # 兩路皆敗時，維持 None，不給假數字
+            data['yield_spread_bps'] = None
 
     # 【長週期慢指標】僅在每月1號大體檢時抓取
     if is_monthly_check:
