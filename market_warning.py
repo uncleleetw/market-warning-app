@@ -18,7 +18,7 @@ def get_trend_arrow(series):
 def get_market_data(is_monthly_check):
     data = {}
     
-    # 同時下載所有需要的歷史K線，設定5天與1個月(20工作日約需35天)的緩衝，極大化降低被 Yahoo 阻擋的機率
+    # 同時下載所有需要的歷史K線，設定40天大緩衝，極大化降低被 Yahoo 阻擋的機率
     try:
         tickers = ["^VIX", "SPY", "^GSPC", "^TNX", "^2Y", "HYG", "TWD=X", "^TWII"]
         df = yf.download(tickers, period="40d", progress=False)
@@ -62,7 +62,7 @@ def get_market_data(is_monthly_check):
     except Exception:
         data['yield_spread_bps'], data['yield_arrow'] = None, "⏳"
 
-    # --- 4. 新增：高收益債利差 (HY OAS 逆向推導模型) ---
+    # --- 4. 高收益債利差 (HY OAS 逆向推導模型) ---
     try:
         # 利用全球最大高收益債 ETF (HYG) 價格反向推導信用利差
         hyg_series = df['Close']['HYG'].dropna() if df is not None else yf.Ticker("HYG").history(period="5d")['Close'].dropna()
@@ -73,7 +73,7 @@ def get_market_data(is_monthly_check):
     except Exception:
         data['hy_oas'], data['hy_arrow'] = None, "⏳"
 
-    # --- 5. 新增：台幣兌美元匯率 ---
+    # --- 5. 台幣兌美元匯率 ---
     try:
         twd_series = df['Close']['TWD=X'].dropna() if df is not None else yf.Ticker("TWD=X").history(period="5d")['Close'].dropna()
         data['twd_fx'] = round(float(twd_series.iloc[-1]), 3)
@@ -81,7 +81,7 @@ def get_market_data(is_monthly_check):
     except Exception:
         data['twd_fx'], data['twd_arrow'] = None, "⏳"
 
-    # --- 6. 新增：台股加權指數 20日乖離率 ---
+    # --- 6. 台股加權指數 20日乖離率 ---
     try:
         twii_series = df['Close']['^TWII'].dropna() if df is not None else yf.Ticker("^TWII").history(period="35d")['Close'].dropna()
         current_twii = twii_series.iloc[-1]
@@ -143,40 +143,4 @@ def generate_warning_report():
     if data['pe_ratio'] is None:
         pe_text, pe_alert = "數據擷取延遲 ⏳", "⚪ 觀測中"
     else:
-        pe_text = f"{data['pe_ratio']:.1f} 倍"
-        if data['pe_ratio'] > 30:
-            total_score += 2
-            pe_alert = "🔴 極高 (2分)"
-        elif data['pe_ratio'] > 26:
-            total_score += 1
-            pe_alert = "🟡 偏高 (1分)"
-        else:
-            pe_alert = "🟢 合理 (0分)"
-
-    # 3. 10Y-2Y 美債利差
-    if data['yield_spread_bps'] is None:
-        yield_text, yield_alert = "數據擷取延遲 ⏳", "⚪ 觀測中"
-    else:
-        yield_text = f"{data['yield_spread_bps']:.1f} bps {data['yield_arrow']}"
-        if data['yield_spread_bps'] < -50:
-            total_score += 2
-            yield_alert = "🔴 深層倒掛 (2分)"
-        elif data['yield_spread_bps'] < 0:
-            total_score += 1
-            yield_alert = "🟡 倒掛 (1分)"
-        else:
-            yield_alert = "🟢 正常 (0分)"
-
-    # 4. 高收益債利差 (HY OAS)
-    if data['hy_oas'] is None:
-        hy_text, hy_alert = "數據擷取延遲 ⏳", "⚪ 觀測中"
-    else:
-        hy_text = f"{data['hy_oas']:.2f}% {data['hy_arrow']}"
-        if data['hy_oas'] > 5.0:
-            total_score += 2
-            hy_alert = "🔴 信用風險極高 (2分)"
-        elif data['hy_oas'] > 4.0:
-            total_score += 1
-            hy_alert = "🟡 風險溢價攀升 (1分)"
-        else:
-            hy_alert = "🟢
+        pe_text =
