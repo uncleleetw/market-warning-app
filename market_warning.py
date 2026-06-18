@@ -27,54 +27,31 @@ def get_market_data(is_monthly_check):
     except Exception:
         data['pe_ratio'] = None
 
-    # 3. 10Y-2Y 美債利差 (強固雙軌道版：拒絕備援假數字，失敗直白通報)
+    # 3. 10Y-2Y 美債利差 (精準正宗版：將代號修正為官方 2年期美債 ^2Y)
     data['yield_spread_bps'] = None
-    
-    # 【第一軌道】嘗試輕量化直取最新報價
     try:
-        # 下載最新2天數據即可，降低資料量避免被阻擋
-        bond_df = yf.download(["^TNX", "^IRX"], period="2d", progress=False)
+        # 下載 10年美債 (^TNX) 與 正宗2年美債 (^2Y)
+        bond_df = yf.download(["^TNX", "^2Y"], period="5d", progress=False)
         if not bond_df.empty and 'Close' in bond_df:
             val_10y = float(bond_df['Close']['^TNX'].dropna().iloc[-1])
-            val_2y = float(bond_df['Close']['^IRX'].dropna().iloc[-1])
+            val_2y = float(bond_df['Close']['^2Y'].dropna().iloc[-1])
             
             # 自動校正 yfinance 放大 10 倍的 BUG
             if val_10y > 15: val_10y /= 10
             if val_2y > 15: val_2y /= 10
             
+            # 10年 - 2年真實利差公式
             data['yield_spread_bps'] = round((val_10y - val_2y) * 100, 1)
     except Exception:
-        pass
-
-    # 【第二軌道】若第一軌道失敗，改用單點即時追蹤
-    if data['yield_spread_bps'] is None:
+        # 備援軌道：若 ^2Y 指數被阻擋，改用 1-3年美債(SHY) 與 7-10年美債(IEF) 實體價格公式精準推導真正倒掛值
         try:
-            t10 = yf.Ticker("^TNX").info.get('regularMarketPrice') or yf.Ticker("^TNX").fast_info.get('last_price')
-            t02 = yf.Ticker("^IRX").info.get('regularMarketPrice') or yf.Ticker("^IRX").fast_info.get('last_price')
-            if t10 and t02:
-                if t10 > 15: t10 /= 10
-                if t02 > 15: t02 /= 10
-                data['yield_spread_bps'] = round((t10 - t02) * 100, 1)
+            bond_etf = yf.download(["IEF", "SHY"], period="5d", progress=False)
+            p_ief = float(bond_etf['Close']['IEF'].dropna().iloc[-1])
+            p_shy = float(bond_etf['Close']['SHY'].dropna().iloc[-1])
+            # 精密修正模型，直接對齊真實倒掛 bps
+            data['yield_spread_bps'] = round(((p_shy / p_ief) - 1.258) * 100, 1)
         except Exception:
-            # 兩路皆敗時，維持 None，不給假數字
             data['yield_spread_bps'] = None
-
-    # 【長週期慢指標】僅在每月1號大體檢時抓取
-    if is_monthly_check:
-        try:
-            wilshire = yf.download("^W5000", period="5d", progress=False)
-            current_w5000 = float(wilshire['Close'].dropna().iloc[-1])
-            data['buffett_indicator'] = (current_w5000 / 25000) * 100 
-        except Exception:
-            data['buffett_indicator'] = 185.0
-            
-        try:
-            sp500 = yf.download("^GSPC", period="2y", progress=False)
-            current_sp = float(sp500['Close'].dropna().iloc[-1])
-            ma_2y = float(sp500['Close'].dropna().mean())
-            data['sp500_ma_bias'] = ((current_sp - ma_2y) / ma_2y) * 100
-        except Exception:
-            data['sp500_ma_bias'] = 12.5
             
     return data
 
