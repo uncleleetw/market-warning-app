@@ -10,7 +10,7 @@ def get_market_data(is_monthly_check):
     try:
         vix_data = yf.download("^VIX", period="5d", progress=False)
         if not vix_data.empty:
-            data['vix'] = float(vix_data['Close'].iloc[-1])
+            data['vix'] = float(vix_data['Close'].dropna().iloc[-1])
         else:
             raise Exception("Index failed")
     except Exception:
@@ -18,7 +18,7 @@ def get_market_data(is_monthly_check):
             vixy = yf.Ticker("VIXY").history(period="5d")
             data['vix'] = float(vixy['Close'].iloc[-1]) * 1.35
         except Exception:
-            data['vix'] = None  # 若失敗不給假數字
+            data['vix'] = None
 
     # 2. S&P 500 本益比
     try:
@@ -27,20 +27,26 @@ def get_market_data(is_monthly_check):
     except Exception:
         data['pe_ratio'] = None
 
-    # 3. 10Y-2Y 美債利差 (終極解法：改用絕對不卡線的實體美債 ETF 價格，經殖利率公式精密逆向推導)
+    # 3. 10Y-2Y 美債利差 (精準修正版：直接下載大盤歷史K線，並自動修正 yfinance 的 10 倍縮放異常)
     try:
-        # 下載 7-10年美債(IEF) 與 1-3年美債(SHY) 歷史數據
-        bond_df = yf.download(["IEF", "SHY"], period="5d", progress=False)
+        # 同時下載 10年美債殖利率(^TNX) 與 2年美債殖利率(^IRX)
+        bond_df = yf.download(["^TNX", "^IRX"], period="5d", progress=False)
         if not bond_df.empty and 'Close' in bond_df:
-            p_ief = float(bond_df['Close']['IEF'].dropna().iloc[-1])
-            p_shy = float(bond_df['Close']['SHY'].dropna().iloc[-1])
+            # 抓取最新一個有效交易日的收盤數值
+            val_10y = float(bond_df['Close']['^TNX'].dropna().iloc[-1])
+            val_2y = float(bond_df['Close']['^IRX'].dropna().iloc[-1])
             
-            # 運用長短天期債券價格比率，動態估算市場實際的殖利率差距 (換算為標準 BPS)
-            # 此模型利差會隨美債每日交易即時跳動，且與美債走勢高度精準連動
-            calculated_bps = ((p_shy / p_ief) - 1.155) * 1000
+            # 【核心修正】yfinance 抓美債常有放大 10 倍的世紀 BUG (例如 4.2% 變成 42.0)
+            # 如果發現數字大於 15，代表被自動放大了，必須除以 10 還原
+            if val_10y > 15: val_10y /= 10
+            if val_2y > 15: val_2y /= 10
+            
+            # 真實利差計算公式：(10年期殖利率 - 2年期殖利率) * 100 倍百分點 (bps)
+            # 例如 10年期 4.2% - 2年期 4.4% = -0.2% = -20 bps
+            calculated_bps = (val_10y - val_2y) * 100
             data['yield_spread_bps'] = round(calculated_bps, 1)
         else:
-            raise Exception("ETF failed")
+            raise Exception("Bond download empty")
     except Exception:
         data['yield_spread_bps'] = None
 
@@ -74,7 +80,6 @@ def generate_warning_report():
     pe_alert = "🟢 正常"
     yield_alert = "🟢 正常"
     
-    # VIX 狀態判定
     if data['vix'] is None:
         vix_text = "數據擷取延遲 ⏳"
     else:
@@ -86,7 +91,6 @@ def generate_warning_report():
             risk_points += 1
             vix_alert = "🔴 恐慌 (超過 30)"
             
-    # 本益比狀態判定
     if data['pe_ratio'] is None:
         pe_text = "數據擷取延遲 ⏳"
     else:
@@ -98,7 +102,6 @@ def generate_warning_report():
             risk_points += 1
             pe_alert = "🔴 極高 (超過 30倍)"
             
-    # 美債利差狀態判定
     if data['yield_spread_bps'] is None:
         yield_text = "數據擷取延遲 ⏳"
     else:
@@ -107,7 +110,6 @@ def generate_warning_report():
             risk_points += 1
             yield_alert = "🟡 倒掛 (利差小於 0)"
         
-    # 判定總體警戒燈號
     if (data['vix'] is None and data['pe_ratio'] is None and data['yield_spread_bps'] is None):
         status_light = "⚪ 【系統維護中】暫時無法取得核心指標"
     elif risk_points >= 3:
@@ -147,23 +149,12 @@ def generate_warning_report():
 def send_line_message(message_text):
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
     user_id = os.environ.get("LINE_USER_ID")
-    
-    if not token or not user_id:
-        return
-
+    if not token or not user_id: return
     url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}"
-    }
-    payload = {
-        "to": user_id,
-        "messages": [{"type": "text", "text": message_text}]
-    }
-    try:
-        requests.post(url, headers=headers, json=payload)
-    except Exception:
-        pass
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    payload = {"to": user_id, "messages": [{"type": "text", "text": message_text}]}
+    try: requests.post(url, headers=headers, json=payload)
+    except: pass
 
 def main():
     report_content = generate_warning_report()
